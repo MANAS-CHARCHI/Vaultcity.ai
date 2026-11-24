@@ -108,12 +108,22 @@ export interface StagedFile {
   pages?: StagedPage[];
 }
 
+export interface InteractiveOption {
+  id: string;
+  label: string;
+  value: string;
+  prompt_payload?: string;
+}
+
 export interface ChatMessage {
   id: string;
   sender: 'user' | 'assistant';
   text: string;
   timestamp: string;
   sources?: string[];
+  interactiveOptions?: InteractiveOption[];
+  strategyUsed?: string;
+  tokensUsed?: number;
   executionTrace?: {
     step: string;
     durationMs: number;

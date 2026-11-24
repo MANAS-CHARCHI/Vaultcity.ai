@@ -824,12 +824,14 @@ export async function apiGetActivityLogs(
   };
 }
 
-/** Send a chat query to Vault Assistant powered by Claude Haiku & pgvector */
+/** Send a chat query to Vault Assistant powered by Smart Agentic RAG */
 export async function apiSendChatMessage(content: string, conversationId?: string): Promise<{
   id: string;
   sender: 'assistant';
   content: string;
   sources: string[];
+  interactive_options?: import('../types').InteractiveOption[];
+  strategy_used?: string;
   tokens_used: number;
   created_at: string;
 }> {

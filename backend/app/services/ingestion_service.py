@@ -743,6 +743,11 @@ async def process_uploaded_file(
                 file_record.is_pii = _detect_pii(extracted, file_record.category)
                 file_record.description = summary
                 file_record.updated_at = datetime.utcnow()
+                try:
+                    from app.services.entity_extractor import sync_entities_from_document
+                    await sync_entities_from_document(db, user_id=user_id, text=extracted, source_file_id=file_id)
+                except Exception as _e_sync:
+                    logger.warning("Could not sync identity entities from SAM pipeline: %s", _e_sync)
                 await db.commit()
                 log_file_event(
                     "PIPELINE_COMPLETE",
@@ -1116,6 +1121,17 @@ async def process_uploaded_file(
             file_record.description = clean_summary
             file_record.pages_json = json.dumps(scan_report, ensure_ascii=False).replace("\x00", "")
             file_record.updated_at = datetime.utcnow()
+
+            try:
+                from app.services.entity_extractor import sync_entities_from_document
+                await sync_entities_from_document(
+                    db,
+                    user_id=user_id,
+                    text=(normalized_text or visible_text or ""),
+                    source_file_id=file_id,
+                )
+            except Exception as _e_sync:
+                logger.warning("Could not sync identity entities: %s", _e_sync)
 
             await _log_audit(
                 db,

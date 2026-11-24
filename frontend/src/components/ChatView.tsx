@@ -181,13 +181,28 @@ export const ChatView: React.FC<ChatViewProps> = ({
           return (
             <div key={msg.id} className="flex justify-start w-full">
               <div className="w-full sm:max-w-[88%] rounded-2xl p-3.5 sm:p-4 bg-white dark:bg-[#1C1510] border border-orange-200/80 dark:border-[#2D2118] shadow-xs rounded-tl-xs">
-                {/* Header: Answer + Copy action */}
+                {/* Header: Answer + Strategy badge + Copy action */}
                 <div className="flex items-center justify-between pb-1.5 mb-2 border-b border-orange-100/70 dark:border-[#261B13]">
                   <div className="flex items-center gap-1.5 text-stone-700 dark:text-stone-300">
                     <Sparkles className="w-3.5 h-3.5 text-orange-500" />
                     <span className="text-xs font-semibold font-sans">
                       Answer
                     </span>
+                    {msg.strategyUsed === 'fast_profile_cache' && (
+                      <span className="text-[9px] font-mono font-bold bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 px-1.5 py-0.2 rounded">
+                        ⚡ profile cache
+                      </span>
+                    )}
+                    {msg.strategyUsed === 'multi_hop_investigator' && (
+                      <span className="text-[9px] font-mono font-bold bg-purple-500/10 text-purple-700 dark:text-purple-400 border border-purple-500/20 px-1.5 py-0.2 rounded">
+                        🧠 multi-hop verified
+                      </span>
+                    )}
+                    {msg.strategyUsed === 'interactive_clarification' && (
+                      <span className="text-[9px] font-mono font-bold bg-blue-500/10 text-blue-700 dark:text-blue-400 border border-blue-500/20 px-1.5 py-0.2 rounded">
+                        🤝 interactive choice
+                      </span>
+                    )}
                   </div>
 
                   {!isNotFound && (
@@ -222,6 +237,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 ) : (
                   <div className="text-xs sm:text-[13px] text-stone-900 dark:text-stone-100 leading-relaxed whitespace-pre-wrap">
                     {renderFormattedText(msg.text)}
+                  </div>
+                )}
+
+                {/* Interactive Clarification Option Buttons (1-click choice) */}
+                {msg.interactiveOptions && msg.interactiveOptions.length > 0 && (
+                  <div className="mt-3 pt-2.5 border-t border-orange-100/70 dark:border-[#261B13] space-y-1.5">
+                    <p className="text-[10px] font-mono text-stone-500 dark:text-stone-400 font-semibold">
+                      Select an option:
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {msg.interactiveOptions.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => onSendMessage(opt.prompt_payload || opt.label)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold bg-orange-500/10 hover:bg-orange-600 hover:text-white text-orange-700 dark:text-orange-400 dark:hover:bg-orange-500 dark:hover:text-stone-950 border border-orange-500/25 transition-all cursor-pointer shadow-2xs active:scale-95"
+                        >
+                          <span>{opt.label}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
 

@@ -13,6 +13,14 @@ class ChatMessageCreate(BaseModel):
     conversation_id: Optional[uuid.UUID] = Field(None, description="Optional existing conversation ID")
 
 
+class InteractiveOption(BaseModel):
+    """Clickable 1-click option pill for interactive clarification."""
+    id: str
+    label: str
+    value: str
+    prompt_payload: str
+
+
 class ChatMessageResponse(BaseModel):
     """Chat message response schema."""
     model_config = ConfigDict(from_attributes=True)
@@ -22,6 +30,8 @@ class ChatMessageResponse(BaseModel):
     sender: str = Field(..., max_length=32)
     content: str
     sources: Optional[List[Any]] = None
+    interactive_options: Optional[List[InteractiveOption]] = None
+    strategy_used: Optional[str] = None
     tokens_used: int = 0
     created_at: datetime
 

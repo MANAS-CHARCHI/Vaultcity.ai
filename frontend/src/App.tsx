@@ -573,6 +573,9 @@ const scrubInfectedLocalStorage = (): void => {
         text: res.content,
         timestamp: res.created_at || new Date().toISOString(),
         sources: res.sources,
+        interactiveOptions: res.interactive_options,
+        strategyUsed: res.strategy_used,
+        tokensUsed: res.tokens_used,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err: any) {

@@ -80,8 +80,9 @@ async def send_chat_message(
         db.add(conv)
         await db.flush()
 
-    # 2. Execute strict embedding-only RAG workflow with LangGraph & Claude Haiku
-    rag_result = await run_assistant_rag(
+    # 2. Execute Smart Agentic RAG (Fast Profile Cache -> Single-Shot RAG -> Investigator ReAct Loop)
+    from app.services.agentic_rag import run_smart_agentic_rag
+    rag_result = await run_smart_agentic_rag(
         query=query_text,
         user_id=str(current_user.id),
         db=db,
@@ -90,6 +91,8 @@ async def send_chat_message(
     reply_text = rag_result["reply"]
     sources = rag_result.get("sources", [])
     tokens_used = rag_result.get("tokens_used", 0)
+    interactive_opts = rag_result.get("interactive_options") or []
+    strategy_used = rag_result.get("strategy_used")
 
     # 3. Save messages in chat_messages table
     user_msg_id = uuid.uuid4()
@@ -130,6 +133,8 @@ async def send_chat_message(
         sender="assistant",
         content=reply_text,
         sources=sources[:5],
+        interactive_options=interactive_opts,
+        strategy_used=strategy_used,
         tokens_used=tokens_used,
         created_at=now,
     )

@@ -4,6 +4,7 @@ from app.models.file import FileDocument
 from app.models.document_chunk import DocumentChunk
 from app.models.conversation import Conversation, ChatMessageModel
 from app.models.audit_log import AuditLog
+from app.models.user_entity import UserEntity
 
 __all__ = [
     "User",
@@ -13,4 +14,5 @@ __all__ = [
     "Conversation",
     "ChatMessageModel",
     "AuditLog",
+    "UserEntity",
 ]

@@ -24,7 +24,7 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -47,7 +47,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vault_user} -d ${POSTGRES_DB:-vault_db}" ]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-vault_user} -d ${POSTGRES_DB:-vault_db}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -56,6 +60,7 @@ services:
 
   clamav:
     image: clamav/clamav:stable
+    platform: linux/amd64
     container_name: vault_clamav
     restart: unless-stopped
     ports:
@@ -63,7 +68,7 @@ services:
     volumes:
       - clamav_data:/var/lib/clamav
     healthcheck:
-      test: [ "CMD", "clamdcheck.sh" ]
+      test: ["CMD", "clamdcheck.sh"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -85,7 +90,7 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test: [ "CMD", "mc", "ready", "local" ]
+      test: ["CMD", "mc", "ready", "local"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -118,6 +123,7 @@ services:
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-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}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
+      ANTHROPIC_SONNET_MODEL: ${ANTHROPIC_SONNET_MODEL:-claude-sonnet-4-5-20250929}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

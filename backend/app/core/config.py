@@ -30,9 +30,10 @@ class Settings(BaseSettings):
     # Host-mounted File Pipeline Logs (persisted in ./logs on host + docker logs stdout)
     FILE_LOG_DIR: str = "/app/logs"
 
-    # Vision / Image Summary Engine (Anthropic Claude Haiku -> Gemini Vision -> Ollama VLM -> Built-in Tesseract OCR + Analyzer)
+    # Vision / Image Summary Engine (Anthropic Claude Haiku / Sonnet -> Gemini Vision -> Ollama VLM -> Built-in Tesseract OCR + Analyzer)
     ANTHROPIC_API_KEY: Optional[str] = None
     ANTHROPIC_MODEL: str = "claude-haiku-4-5-20251001"
+    ANTHROPIC_SONNET_MODEL: str = "claude-sonnet-4-5-20250929"
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_VISION_MODEL: str = "gemini-2.5-flash"
     OLLAMA_URL: Optional[str] = None

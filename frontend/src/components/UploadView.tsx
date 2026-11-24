@@ -47,6 +47,11 @@ export const UploadView: React.FC<UploadViewProps> = ({ onConfirmUpload }) => {
     }
     setErrorMessage(null);
 
+    // Always clear target doc if doing a standard document addition
+    if (!isAppendingToTarget) {
+      setTargetDocIdForPage(null);
+    }
+
     // If appending photos to an existing staged document bundle
     if (isAppendingToTarget && targetDocIdForPage) {
       const newPages: StagedPage[] = [];
@@ -323,6 +328,11 @@ export const UploadView: React.FC<UploadViewProps> = ({ onConfirmUpload }) => {
     try {
       await onConfirmUpload(payload);
       setStagedFiles([]);
+      setTargetDocIdForPage(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (cameraInputRef.current) cameraInputRef.current.value = '';
+      if (addPageInputRef.current) addPageInputRef.current.value = '';
+      if (addPageCameraRef.current) addPageCameraRef.current.value = '';
     } catch (err: any) {
       setErrorMessage(err?.message || 'Upload failed. Please try again.');
     } finally {
@@ -350,23 +360,29 @@ export const UploadView: React.FC<UploadViewProps> = ({ onConfirmUpload }) => {
         </div>
       )}
 
-      {/* Hidden inputs */}
+      {/* Hidden inputs — all support multi-file selection and clean reset */}
       <input
         ref={fileInputRef}
         type="file"
         multiple
         accept="*/*"
         className="hidden"
-        onChange={(e) => handleFilesSelected(e.target.files)}
+        onChange={(e) => {
+          handleFilesSelected(e.target.files);
+          e.target.value = '';
+        }}
       />
 
       <input
         ref={cameraInputRef}
         type="file"
+        multiple
         accept="image/*"
-        capture="environment"
         className="hidden"
-        onChange={(e) => handleFilesSelected(e.target.files)}
+        onChange={(e) => {
+          handleFilesSelected(e.target.files);
+          e.target.value = '';
+        }}
       />
 
       {/* Inputs for adding additional page / back side to an existing staged card */}
@@ -376,16 +392,22 @@ export const UploadView: React.FC<UploadViewProps> = ({ onConfirmUpload }) => {
         multiple
         accept="image/*,application/pdf"
         className="hidden"
-        onChange={(e) => handleFilesSelected(e.target.files, true)}
+        onChange={(e) => {
+          handleFilesSelected(e.target.files, true);
+          e.target.value = '';
+        }}
       />
 
       <input
         ref={addPageCameraRef}
         type="file"
+        multiple
         accept="image/*"
-        capture="environment"
         className="hidden"
-        onChange={(e) => handleFilesSelected(e.target.files, true)}
+        onChange={(e) => {
+          handleFilesSelected(e.target.files, true);
+          e.target.value = '';
+        }}
       />
 
       {stagedFiles.length === 0 ? (
@@ -449,23 +471,43 @@ export const UploadView: React.FC<UploadViewProps> = ({ onConfirmUpload }) => {
         </div>
       ) : (
         /* Staging Screen in Val Town file format */
-        <div className="bg-white dark:bg-[#1C1510] border border-orange-200/80 dark:border-[#2D2118] rounded-xl p-3.5 shadow-val space-y-3 font-mono">
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDragging(true);
+          }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={handleDrop}
+          className={`border rounded-xl p-3.5 shadow-val space-y-3 font-mono transition-all ${
+            isDragging
+              ? 'border-orange-500 dark:border-orange-400 bg-orange-100/50 dark:bg-[#281D16]'
+              : 'bg-white dark:bg-[#1C1510] border-orange-200/80 dark:border-[#2D2118]'
+          }`}
+        >
           <div className="flex items-center justify-between pb-2 border-b border-stone-100 dark:border-stone-800">
             <div>
               <h3 className="text-xs font-bold text-stone-900 dark:text-white">staged documents for upload</h3>
-              <p className="text-[10px] text-stone-400">attach multiple photos per document or keep separate</p>
+              <p className="text-[10px] text-stone-400">drag & drop or browse more files anytime</p>
             </div>
             <div className="flex items-center space-x-2">
               {imageItemsCount >= 2 && (
                 <button
                   type="button"
                   onClick={bundleAllImagesIntoOne}
-                  className="flex items-center space-x-1 text-[10px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded hover:bg-emerald-500/20 transition-colors"
+                  className="flex items-center space-x-1 text-[10px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded hover:bg-emerald-500/20 transition-colors cursor-pointer"
                 >
                   <Sparkles className="w-3 h-3" />
                   <span>bundle into 1 document</span>
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center space-x-1 text-[10px] bg-orange-500/10 text-orange-700 dark:text-orange-400 border border-orange-500/20 px-2 py-0.5 rounded hover:bg-orange-500/20 transition-colors font-semibold cursor-pointer"
+              >
+                <Plus className="w-3 h-3" />
+                <span>+ browse more</span>
+              </button>
               <span className="text-[10px] bg-stone-100 dark:bg-stone-800 px-2 py-0.5 rounded text-stone-600 dark:text-stone-300">
                 {stagedFiles.length} item{stagedFiles.length > 1 ? 's' : ''}
               </span>

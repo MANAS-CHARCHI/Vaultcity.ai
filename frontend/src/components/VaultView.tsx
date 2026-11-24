@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, FileCode2, Download, Trash2, Eye, LayoutGrid, List, Edit2, Check, X, Share2, Loader2, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { Search, FileCode2, Download, Trash2, Eye, LayoutGrid, List, Edit2, Check, X, Share2, Loader2, ShieldAlert, ShieldCheck, UploadCloud } from 'lucide-react';
 import { DocumentFile } from '../types';
 
 interface VaultViewProps {
@@ -70,8 +70,20 @@ export const VaultView: React.FC<VaultViewProps> = ({
           />
         </div>
 
-        {/* Categories & View Switcher */}
+        {/* Categories, Upload & View Switcher */}
         <div className="flex items-center justify-between sm:justify-end gap-2 overflow-x-auto text-xs">
+          {onUploadClick && (
+            <button
+              type="button"
+              onClick={onUploadClick}
+              className="flex items-center space-x-1 px-2.5 py-1 bg-orange-600 hover:bg-orange-700 text-white dark:bg-orange-500 dark:hover:bg-orange-400 dark:text-stone-950 rounded text-xs font-semibold font-mono transition-all cursor-pointer shrink-0 shadow-xs"
+              title="Upload new documents"
+            >
+              <UploadCloud className="w-3.5 h-3.5" />
+              <span>+ upload</span>
+            </button>
+          )}
+
           <div className="flex items-center space-x-1">
             {categories.map((cat) => (
               <button

@@ -25,7 +25,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, TypedDict
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 import uuid
 
 from langgraph.graph import END, START, StateGraph
@@ -35,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.document_chunk import DocumentChunk
 from app.models.file import FileDocument
+from app.models.user import User
 from app.services.claude_tracker import call_claude_messages
 from app.services.ingestion_service import _embed_chunk_text
 from app.services.vector_service import vector_service
@@ -46,24 +48,29 @@ MIN_RAG_SIMILARITY = 0.05
 RAG_TOP_K = 10
 RAG_SIMILARITY_PERCENT = 70
 
-# Haiku system prompt enforcing focused required information & optional note
+# Haiku system prompt enforcing focused required information, user identity, & real-time date awareness
 HAIKU_SYSTEM_PROMPT = (
     "You are the Vault City AI Assistant (va), an ultra-concise NLP direct entity extraction engine.\n"
-    "VAULT CONTEXT:\n"
+    "VAULT & TEMPORAL CONTEXT:\n"
     "- This is the authenticated user's private personal document vault.\n"
-    "- All personal documents, resumes, identity cards, tax forms, employment contracts, and records in this vault belong to the user.\n"
-    "- When the user asks 'who am I', 'what is my name', 'my resume', 'my experience', 'my father', 'my aadhaar', 'my salary', answer directly using the person's identity and details documented in their vault files.\n\n"
+    "- Authenticated User: {user_display_name} ({user_email}).\n"
+    "- Today's Real-Time Reference Date: {current_date_str}.\n"
+    "- CRITICAL TEMPORAL RULE: Today ({iso_date}) is the current, latest reference day. "
+    "Any journey date, ticket date, booking, or deadline >= {iso_date} is upcoming/future; dates < {iso_date} are in the past.\n"
+    "- When the user asks like 'who am I', 'what is my name', 'my resume', 'my experience', 'my father', 'my aadhaar', 'my salary', 'my train', 'my ticket' or similar questions, answer directly using the person's identity and details documented in their vault files.\n\n"
     "STRICT OUTPUT INSTRUCTIONS:\n"
     "1. FOCUS ON WHAT IS ACTUALLY REQUIRED: Output ONLY the important information / key detail the user is asking for (e.g. the specific name, number, ID, date, role, or amount).\n"
     "2. FORMAT: Enclose every specific value/name/number/ID/date/amount/job title in backticks like `value` (e.g. `CGGPC3460G`, `Manas Charchi`, `4321 8765 2109`, `₹18,000`). This allows the user to copy only that specific detail with one click.\n"
-    "3. NOTE (ONLY IF REQUIRED): If and only if critical supporting context or clarification is essential, add a single short line below prefixed with 'Note: ' (e.g. 'Note: Issued by Income Tax Department, Govt of India.'). If no note is needed, output ONLY the direct value.\n"
-    "4. NO FILLER: Zero conversational filler, no 'Based on the documents...', no pleasantries, and no preamble.\n"
+    "3. NOTE (ONLY IF REQUIRED): If and only if critical supporting context or clarification is essential, add a single short line below prefixed with 'Note: ' (e.g. 'Note: Journey on 02 Dec 2026.'). If no note is needed, output ONLY the direct value.\n"
+    "4. SHORT AND QUICK: Zero conversational filler, no 'Based on the documents...', no pleasantries, and no preamble.\n"
     "5. Answer using ONLY the provided document embedding excerpts. If not present in the excerpts, reply strictly:\n"
     "   \"No data found\"\n"
     "6. Do NOT list source document filenames in your answer text; sources are tracked automatically in citation references."
 )
 
 HAIKU_USER_TEMPLATE = (
+    "Today's Real-Time Date: {current_date_str}\n"
+    "Authenticated User: {user_display_name}\n"
     "Targeted Vault Document(s): {target_docs}\n"
     "AI Question Analysis: {explanation}\n"
     "User Query: {query}\n\n"
@@ -76,6 +83,8 @@ class RAGState(TypedDict, total=False):
     query: str
     user_id: str
     db: AsyncSession
+    user_info: Dict[str, Any]
+    realtime_context: Dict[str, Any]
     vault_doc_catalog: List[Dict[str, Any]]
     ai_explanation: Dict[str, Any]
     query_embedding: List[float]
@@ -89,16 +98,69 @@ class RAGState(TypedDict, total=False):
     token_info: Dict[str, Any]
 
 
+async def get_user_realtime_context(
+    user_id: str,
+    db: AsyncSession,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Backend Tool: Resolves live user profile info and high-precision real-time date/time context.
+    Supplies temporal grounding and resolves user pronouns for AI query elaboration,
+    pgvector embeddings, and concise RAG generation.
+    """
+    user_info: Dict[str, Any] = {
+        "user_id": user_id,
+        "username": "User",
+        "email": "",
+    }
+    try:
+        uid = uuid.UUID(str(user_id))
+        user_res = await db.get(User, uid)
+        if user_res:
+            name = (user_res.username or "").strip()
+            if not name and user_res.email:
+                name = user_res.email.split("@")[0]
+            user_info["username"] = name or "User"
+            user_info["email"] = user_res.email or ""
+    except Exception as exc:
+        logger.warning("Could not fetch user record for user_id=%s: %s", user_id, exc)
+
+    now_utc = datetime.now(timezone.utc)
+    day_name = now_utc.strftime("%A")
+    formatted_date = now_utc.strftime("%d %B %Y")
+    iso_date = now_utc.strftime("%Y-%m-%d")
+    full_str = f"{day_name}, {formatted_date} (UTC {now_utc.strftime('%H:%M')})"
+
+    realtime_context: Dict[str, Any] = {
+        "day_name": day_name,
+        "formatted_date": formatted_date,
+        "iso_date": iso_date,
+        "full_date_str": full_str,
+        "year": now_utc.year,
+        "month": now_utc.month,
+        "day": now_utc.day,
+    }
+    return user_info, realtime_context
+
+
 async def explain_query_node(state: RAGState) -> Dict[str, Any]:
     """
-    Step 1: AI Question Explanation with Document Names Sent.
-    Sends user's verified document names to Claude Haiku so it knows what files exist in the vault,
-    identifies target document(s), resolves personal pronouns, and extracts search terms.
+    Step 1: AI Question Explanation with Live User Info & Real-Time Date.
+    1. Fetches user identity info and real-time today date via get_user_realtime_context.
+    2. Sends user's verified document names, real-time date, and identity to Claude Haiku.
+    3. AI resolves pronouns ('my', 'me', 'father') and temporal words ('latest', 'upcoming', 'current')
+       to elaborate the user query into high-precision search terms for vector search.
     """
     query = state.get("query", "").strip()
     uid_str = state.get("user_id", "")
     db: AsyncSession = state["db"]
     uid = uuid.UUID(uid_str)
+
+    # 1. Tool Call: Fetch live User Info and Real-time Date
+    user_info, realtime_context = await get_user_realtime_context(uid_str, db)
+    username = user_info.get("username", "User")
+    email = user_info.get("email", "")
+    today_str = realtime_context.get("full_date_str", "")
+    iso_date = realtime_context.get("iso_date", "")
 
     # Fetch user's indexed document catalog
     stmt = select(
@@ -130,9 +192,18 @@ async def explain_query_node(state: RAGState) -> Dict[str, Any]:
     prompt = (
         f"You are the Vault City AI Personal Vault Query Analyzer.\n"
         f"The user is querying their secure personal document vault.\n\n"
+        f"REAL-TIME & USER CONTEXT:\n"
+        f"- Today's Real-Time Reference Date: {today_str}\n"
+        f"- CRITICAL TEMPORAL RULE: Today ({iso_date}) is the current, latest reference day. "
+        f"Any journey date, ticket date, booking, or deadline >= {iso_date} is upcoming/future; dates < {iso_date} are in the past.\n"
+        f"- Authenticated User: Name=\"{username}\", Email=\"{email}\"\n\n"
         f"Verified Documents Stored in User's Vault:\n"
         f"{doc_list_text}\n\n"
         f"Analyze the user's question: \"{query}\"\n\n"
+        f"Instructions:\n"
+        f"1. Use the authenticated user's name ({username}) to resolve personal pronouns ('my', 'me', 'myself', 'I').\n"
+        f"2. Use the current reference date ({iso_date}) to resolve temporal words ('latest', 'recent', 'upcoming', 'active', 'yesterday', 'this month').\n"
+        f"3. Return targeted search keywords that elaborate the question so pgvector and keyword search can retrieve the exact matching document.\n\n"
         f"Return ONLY valid JSON (no markdown formatting, no code fences) with these exact keys:\n"
         f"- \"intent\": What specific information or entity is the user looking for?\n"
         f"- \"target_documents\": list of matching document filename(s) from the vault above most likely to answer this\n"
@@ -166,6 +237,8 @@ async def explain_query_node(state: RAGState) -> Dict[str, Any]:
         logger.warning("AI query explanation fallback for '%s': %s", query, exc)
 
     return {
+        "user_info": user_info,
+        "realtime_context": realtime_context,
         "vault_doc_catalog": doc_catalog,
         "ai_explanation": explanation_data,
         "tokens_used": tokens_explanation,
@@ -175,15 +248,26 @@ async def explain_query_node(state: RAGState) -> Dict[str, Any]:
 async def embed_query_node(state: RAGState) -> Dict[str, Any]:
     """
     Generate 384-dim normalized query embeddings for raw query and AI expanded search terms
-    combined with target document names.
+    combined with user info, real-time date context, and target document names.
     """
     query = state.get("query", "").strip()
     embedding = _embed_chunk_text(query, settings.VECTOR_DIMENSION)
 
+    user_info = state.get("user_info") or {}
+    username = (user_info.get("username") or "").strip()
+
     ai_exp = state.get("ai_explanation") or {}
     terms = ai_exp.get("search_terms") or []
     target_docs = ai_exp.get("target_documents") or []
-    expanded_text = f"{query} {' '.join(terms)} {' '.join(target_docs)}".strip()
+
+    # Elaborate search text with user identity context, expanded keywords, and document names
+    expanded_parts = [query]
+    if username and username.lower() not in ("user", "") and username.lower() not in query.lower():
+        expanded_parts.append(username)
+    expanded_parts.extend(terms)
+    expanded_parts.extend(target_docs)
+
+    expanded_text = " ".join(expanded_parts).strip()
     expanded_embedding = _embed_chunk_text(expanded_text, settings.VECTOR_DIMENSION)
 
     return {
@@ -337,8 +421,8 @@ def should_generate_answer(state: RAGState) -> str:
 
 async def generate_haiku_answer_node(state: RAGState) -> Dict[str, Any]:
     """
-    Step 3: Send what results (resume, ID, contract, portfolio) RAG retrieved to Claude Haiku.
-    Outputs ONLY the important information / key value requested, with a short Note if required.
+    Step 3: Send retrieved RAG excerpts to Claude Haiku with live User Info and Real-time Date.
+    Outputs ONLY the important information / key value requested, short and quick with backticks.
     """
     query = state.get("query", "")
     context_text = state.get("context_text", "")
@@ -348,35 +432,65 @@ async def generate_haiku_answer_node(state: RAGState) -> Dict[str, Any]:
     target_docs = ai_exp.get("target_documents") or []
     target_docs_str = ", ".join(target_docs) if target_docs else "Vault Documents"
 
+    user_info = state.get("user_info") or {}
+    username = user_info.get("username", "User")
+    email = user_info.get("email", "")
+
+    realtime_ctx = state.get("realtime_context") or {}
+    full_date_str = realtime_ctx.get("full_date_str") or datetime.now(timezone.utc).strftime("%A, %d %B %Y")
+    iso_date = realtime_ctx.get("iso_date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    system_prompt = HAIKU_SYSTEM_PROMPT.format(
+        user_display_name=username,
+        user_email=email,
+        current_date_str=full_date_str,
+        iso_date=iso_date,
+    )
     prompt = HAIKU_USER_TEMPLATE.format(
+        current_date_str=full_date_str,
+        user_display_name=username,
         target_docs=target_docs_str,
         explanation=explanation_summary,
         query=query,
         context=context_text,
     )
-    haiku_model = settings.ANTHROPIC_MODEL or "claude-haiku-4-5-20251001"
+    sonnet_model = settings.ANTHROPIC_SONNET_MODEL or "claude-sonnet-4-5-20250929"
     existing_tokens = int(state.get("tokens_used", 0))
 
     try:
         reply_text, token_info = await call_claude_messages(
             messages=[{"role": "user", "content": prompt}],
-            system_prompt=HAIKU_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_id=uid_str,
             call_type="chat_rag_embedding",
-            model=haiku_model,
-            max_tokens=300,
+            model=sonnet_model,
+            max_tokens=400,
             temperature=0.1,  # Low temperature for strict factual adherence
         )
+        if not reply_text:
+            haiku_model = settings.ANTHROPIC_MODEL or "claude-haiku-4-5-20251001"
+            if sonnet_model != haiku_model:
+                logger.info("Primary model (%s) returned empty; falling back to %s", sonnet_model, haiku_model)
+                reply_text, token_info = await call_claude_messages(
+                    messages=[{"role": "user", "content": prompt}],
+                    system_prompt=system_prompt,
+                    user_id=uid_str,
+                    call_type="chat_rag_embedding_fallback",
+                    model=haiku_model,
+                    max_tokens=400,
+                    temperature=0.1,
+                )
     except Exception as exc:
-        logger.warning("Claude Haiku RAG call failed (%s); providing safe response.", exc)
+        logger.warning("Claude Sonnet RAG call failed (%s); providing safe response.", exc)
         reply_text = "No data found"
         token_info = {"total_tokens": 0}
 
     new_tokens = int(token_info.get("total_tokens", 0))
     total_tokens = existing_tokens + new_tokens
+    final_reply = reply_text.strip() if reply_text else "No data found"
 
     return {
-        "reply": reply_text.strip(),
+        "reply": final_reply,
         "tokens_used": total_tokens,
         "token_info": token_info,
     }
