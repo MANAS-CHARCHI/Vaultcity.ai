@@ -5,7 +5,6 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, or_
-
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.limiter import rate_limit
