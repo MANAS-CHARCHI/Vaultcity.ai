@@ -37,7 +37,7 @@ from app.core.config import settings
 from app.models.document_chunk import DocumentChunk
 from app.models.file import FileDocument
 from app.models.user import User
-from app.services.claude_tracker import call_claude_messages
+from app.services.openrouter_client import openrouter_client
 from app.services.ingestion_service import _embed_chunk_text
 from app.services.vector_service import vector_service
 
@@ -211,30 +211,37 @@ async def explain_query_node(state: RAGState) -> Dict[str, Any]:
         f"- \"explanation\": 1 sentence explaining which document answers this question and what specific value to extract."
     )
 
+    # Fast deterministic search term extraction (0 tokens, instant)
+    clean_words = [
+        w for w in re.findall(r"\b[A-Za-z0-9_-]+\b", query)
+        if w.lower() not in {"what", "is", "my", "the", "in", "a", "of", "and", "to", "for", "me", "show"}
+    ]
     explanation_data: Dict[str, Any] = {
         "intent": "General vault query",
         "target_documents": [d["filename"] for d in doc_catalog[:3]],
         "explanation": f"Retrieves documents related to '{query}' from user's vault.",
-        "search_terms": [query],
+        "search_terms": clean_words or [query],
     }
     tokens_explanation = 0
 
-    try:
-        raw_text, token_info = await call_claude_messages(
-            messages=[{"role": "user", "content": prompt}],
-            user_id=uid_str,
-            call_type="query_explanation",
-            max_tokens=250,
-            temperature=0.1,
-        )
-        tokens_explanation = int(token_info.get("total_tokens", 0))
-        clean_json = re.sub(r"^```json\s*", "", raw_text.strip(), flags=re.IGNORECASE)
-        clean_json = re.sub(r"\s*```$", "", clean_json)
-        parsed = json.loads(clean_json)
-        if isinstance(parsed, dict) and "search_terms" in parsed:
-            explanation_data = parsed
-    except Exception as exc:
-        logger.warning("AI query explanation fallback for '%s': %s", query, exc)
+    if openrouter_client.is_configured:
+        try:
+            raw_text, token_info = await openrouter_client.call_chat(
+                messages=[{"role": "user", "content": prompt}],
+                user_id=uid_str,
+                call_type="query_explanation",
+                model=settings.OPENROUTER_FAST_MODEL or "qwen/qwen-2.5-7b-instruct",
+                max_tokens=250,
+                temperature=0.1,
+            )
+            tokens_explanation = int(token_info.get("total_tokens", 0))
+            clean_json = re.sub(r"^```json\s*", "", raw_text.strip(), flags=re.IGNORECASE)
+            clean_json = re.sub(r"\s*```$", "", clean_json)
+            parsed = json.loads(clean_json)
+            if isinstance(parsed, dict) and "search_terms" in parsed:
+                explanation_data = parsed
+        except Exception as exc:
+            logger.warning("AI query explanation fallback for '%s': %s", query, exc)
 
     return {
         "user_info": user_info,
@@ -454,40 +461,36 @@ async def generate_haiku_answer_node(state: RAGState) -> Dict[str, Any]:
         query=query,
         context=context_text,
     )
-    sonnet_model = settings.ANTHROPIC_SONNET_MODEL or "claude-sonnet-4-5-20250929"
+    qwen_model = settings.OPENROUTER_DEFAULT_MODEL or "qwen/qwen-2.5-72b-instruct"
     existing_tokens = int(state.get("tokens_used", 0))
 
     try:
-        reply_text, token_info = await call_claude_messages(
+        reply_text, token_info = await openrouter_client.call_chat(
             messages=[{"role": "user", "content": prompt}],
             system_prompt=system_prompt,
             user_id=uid_str,
             call_type="chat_rag_embedding",
-            model=sonnet_model,
-            max_tokens=400,
-            temperature=0.1,  # Low temperature for strict factual adherence
+            model=qwen_model,
+            max_tokens=450,
+            temperature=0.1,
         )
-        if not reply_text:
-            haiku_model = settings.ANTHROPIC_MODEL or "claude-haiku-4-5-20251001"
-            if sonnet_model != haiku_model:
-                logger.info("Primary model (%s) returned empty; falling back to %s", sonnet_model, haiku_model)
-                reply_text, token_info = await call_claude_messages(
-                    messages=[{"role": "user", "content": prompt}],
-                    system_prompt=system_prompt,
-                    user_id=uid_str,
-                    call_type="chat_rag_embedding_fallback",
-                    model=haiku_model,
-                    max_tokens=400,
-                    temperature=0.1,
-                )
     except Exception as exc:
-        logger.warning("Claude Sonnet RAG call failed (%s); providing safe response.", exc)
-        reply_text = "No data found"
+        logger.warning("Qwen RAG call failed (%s); providing safe response.", exc)
+        reply_text = ""
         token_info = {"total_tokens": 0}
 
     new_tokens = int(token_info.get("total_tokens", 0))
     total_tokens = existing_tokens + new_tokens
-    final_reply = reply_text.strip() if reply_text else "No data found"
+
+    # Grounded fallback if no LLM response (e.g. offline or API key not yet set)
+    if not reply_text or not reply_text.strip():
+        if context_text and "(No relevant document passages found)" not in context_text:
+            first_passage = context_text.split("\n\n")[0].strip()
+            final_reply = f"Here is the relevant information found in your vault:\n\n{first_passage}"
+        else:
+            final_reply = "No relevant document passages found in your vault."
+    else:
+        final_reply = reply_text.strip()
 
     return {
         "reply": final_reply,

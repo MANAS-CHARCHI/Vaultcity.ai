@@ -26,7 +26,8 @@ from app.services.agent_tools import (
     tool_get_user_entity,
     tool_search_vault,
 )
-from app.services.claude_tracker import call_claude_messages
+from app.services.openrouter_client import openrouter_client
+from app.services.memory_service import memory_service
 from app.services.rag_workflow import (
     get_user_realtime_context,
     run_assistant_rag,
@@ -128,31 +129,21 @@ async def _run_investigator_loop(
 
     for turn in range(1, 4):
         try:
-            sonnet_model = settings.ANTHROPIC_SONNET_MODEL or "claude-sonnet-4-5-20250929"
-            raw_response, token_info = await call_claude_messages(
+            qwen_model = settings.OPENROUTER_DEFAULT_MODEL or "qwen/qwen-2.5-72b-instruct"
+            raw_response, token_info = await openrouter_client.call_chat(
                 messages=history,
                 system_prompt=system_prompt,
                 user_id=uid_str,
                 call_type="agentic_investigator",
-                model=sonnet_model,
+                model=qwen_model,
                 max_tokens=600,
                 temperature=0.1,
             )
             total_tokens += int(token_info.get("total_tokens", 0))
 
             if not raw_response:
-                haiku_model = settings.ANTHROPIC_MODEL or "claude-haiku-4-5-20251001"
-                if sonnet_model != haiku_model:
-                    raw_response, token_info = await call_claude_messages(
-                        messages=history,
-                        system_prompt=system_prompt,
-                        user_id=uid_str,
-                        call_type="agentic_investigator_fallback",
-                        model=haiku_model,
-                        max_tokens=400,
-                        temperature=0.1,
-                    )
-                    total_tokens += int(token_info.get("total_tokens", 0))
+                # If OpenRouter is not configured or offline, exit loop and fallback cleanly
+                break
 
             clean_json = re.sub(r"^```json\s*", "", raw_response.strip(), flags=re.IGNORECASE)
             clean_json = re.sub(r"\s*```$", "", clean_json)
@@ -241,6 +232,74 @@ async def run_smart_agentic_rag(
     """
     uid = uuid.UUID(str(user_id))
     user_info, realtime_context = await get_user_realtime_context(user_id, db)
+
+    # -------------------------------------------------------------------------
+    # Lane 0: Jev Decision Gate + User Memory Fast Lane (< 20ms, 0 tokens)
+    # -------------------------------------------------------------------------
+    # Load user_memory.md once (<1ms from Redis) and pass the ENTIRE profile to Jev
+    memory_content = await memory_service.load_user_memory(uid)
+    jev_decision = await openrouter_client.call_jev_decision(
+        instruction=(
+            "Examine the user query against their verified personal memory profile. "
+            "If the specific fact/answer is ALREADY present and verified in the profile text, choose 'read_memory_cache'. "
+            "If the fact is MISSING, blank, or requires searching raw vault documents, choose 'single_shot_rag'. "
+            "If it requires multi-document comparisons, journey dates, or tickets, choose 'deep_investigator'."
+        ),
+        context={"query": query, "user_memory_profile": memory_content},
+        choices=["read_memory_cache", "single_shot_rag", "deep_investigator"],
+        default_choice="single_shot_rag",
+        user_id=str(user_id),
+    )
+    route_choice = jev_decision.get("choice", "single_shot_rag")
+
+    if route_choice == "read_memory_cache":
+        # Send user_memory.md as grounded context to Qwen LLM
+        prompt = (
+            f"You are the Vault City AI Personal Assistant.\n"
+            f"Answer the user's question strictly and accurately using the verified personal memory profile below.\n"
+            f"Do not guess or assume any facts not stated. Keep answers concise, direct, and factual with specific values in backticks.\n\n"
+            f"User's Verified Personal Memory Profile:\n"
+            f"\"\"\"\n{memory_content}\n\"\"\"\n\n"
+            f"User Question: {query}"
+        )
+
+        reply_text, token_info = await openrouter_client.call_chat(
+            messages=[{"role": "user", "content": prompt}],
+            user_id=str(user_id),
+            model=settings.OPENROUTER_FAST_MODEL or "qwen/qwen-2.5-7b-instruct",
+            max_tokens=250,
+            temperature=0.1,
+            call_type="memory_cache_llm",
+        )
+
+        if reply_text and reply_text.strip():
+            return {
+                "reply": reply_text.strip(),
+                "sources": ["user_memory.md"],
+                "interactive_options": [],
+                "tokens_used": int(token_info.get("total_tokens", 0)),
+                "strategy_used": "memory_cache_jev",
+            }
+
+        # Offline / No API Key Fallback: check if direct key exists in markdown
+        q_lower = query.lower()
+        for line in memory_content.splitlines():
+            line_str = line.strip()
+            if line_str.startswith("- **") and ":" in line_str:
+                label_part, val_part = line_str.split(":", 1)
+                label_clean = label_part.replace("- **", "").replace("**", "").lower()
+                label_words = [w for w in label_clean.split() if len(w) > 2]
+                if label_words and any(w in q_lower for w in label_words):
+                    val_clean = val_part.split("*(Updated:")[0].strip()
+                    if val_clean and val_clean != "None":
+                        return {
+                            "reply": f"{label_part.replace('- ', '')}: {val_clean}",
+                            "sources": ["user_memory.md"],
+                            "interactive_options": [],
+                            "tokens_used": 0,
+                            "strategy_used": "memory_cache_jev_offline",
+                        }
+
     intent = _detect_query_intent(query)
 
     # -------------------------------------------------------------------------
@@ -282,7 +341,7 @@ async def run_smart_agentic_rag(
     # -------------------------------------------------------------------------
     # Lane 3: Deep Investigator (Multi-Hop / Temporal / Ambiguous)
     # -------------------------------------------------------------------------
-    if intent.startswith("investigate_"):
+    if route_choice == "deep_investigator" or intent.startswith("investigate_"):
         return await _run_investigator_loop(
             query=query,
             user_id=uid,

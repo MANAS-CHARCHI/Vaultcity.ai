@@ -30,6 +30,20 @@ class Settings(BaseSettings):
     # Host-mounted File Pipeline Logs (persisted in ./logs on host + docker logs stdout)
     FILE_LOG_DIR: str = "/app/logs"
 
+    # OpenRouter Unified Gateway (Jev Decision Router + Qwen 2.5 Text/Reasoning)
+    OPENROUTER_API_KEY: Optional[str] = None
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_DEFAULT_MODEL: str = "qwen/qwen-2.5-72b-instruct"
+    OPENROUTER_FAST_MODEL: str = "qwen/qwen-2.5-7b-instruct"
+    OPENROUTER_JEV_MODEL: str = "typesafe/jev"
+    OPENROUTER_FREE_MODELS: str = "meta-llama/llama-3.3-70b-instruct:free,google/gemini-2.0-flash-exp:free,qwen/qwen-2.5-coder-32b-instruct:free"
+    USE_FREE_MODELS_FIRST: bool = True
+
+    # Cloudflare Workers AI (Zero-Cost Daily Free Neurons for Image-Only Vision)
+    CLOUDFLARE_ACCOUNT_ID: Optional[str] = None
+    CLOUDFLARE_API_TOKEN: Optional[str] = None
+    CLOUDFLARE_VISION_MODEL: str = "@cf/meta/llama-3.2-11b-vision-instruct"
+
     # Vision / Image Summary Engine (Anthropic Claude Haiku / Sonnet -> Gemini Vision -> Ollama VLM -> Built-in Tesseract OCR + Analyzer)
     ANTHROPIC_API_KEY: Optional[str] = None
     ANTHROPIC_MODEL: str = "claude-haiku-4-5-20251001"

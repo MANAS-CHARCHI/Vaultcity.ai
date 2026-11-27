@@ -108,6 +108,25 @@ class S3StorageService:
             Metadata=metadata,
         )
 
+    async def save_secured_file(
+        self,
+        *,
+        secured_key: str,
+        data: bytes,
+        content_type: str = "text/markdown; charset=utf-8",
+        metadata: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Directly write verified/system files (such as user_memory.md) to the secured vault bucket."""
+        meta = metadata or {"zone": "secured", "type": "system_profile"}
+        await asyncio.to_thread(
+            self._put_object_sync,
+            settings.S3_SECURED_BUCKET,
+            secured_key,
+            data,
+            content_type,
+            meta,
+        )
+
     async def upload_to_quarantine(
         self,
         *,

@@ -16,7 +16,7 @@ import logging
 from typing import Any, Dict, List, Optional
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,12 +37,13 @@ router = APIRouter(prefix="/chat", tags=["Chat & Vault Assistant"])
 @router.post("/message", response_model=ChatMessageResponse)
 async def send_chat_message(
     payload: ChatMessageCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Send a message to the Vault Assistant.
-    Retrieves semantic document context from pgvector, calls Claude Haiku,
+    Retrieves semantic document context from pgvector, call LLM,
     logs every detail to claude_chat.log and updates the dedicated token metrics database.
     """
     query_text = (payload.content or "").strip()
@@ -126,6 +127,15 @@ async def send_chat_message(
 
     # Invalidate cached user AI token metrics so settings reflects fresh usage immediately
     await delete_cache(make_user_tokens_cache_key(str(current_user.id)))
+
+    # Asynchronous Post-Chat Knowledge Distillation into user_memory.md (0 user wait time)
+    from app.services.memory_service import memory_service
+    background_tasks.add_task(
+        memory_service.distill_and_update_memory,
+        user_id=str(current_user.id),
+        query=query_text,
+        reply=reply_text,
+    )
 
     return ChatMessageResponse(
         id=asst_msg_id,

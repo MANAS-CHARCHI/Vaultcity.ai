@@ -28,7 +28,7 @@ import httpx
 from PIL import Image, ImageOps, ImageStat
 
 from app.core.config import settings
-from app.services.claude_tracker import call_claude_messages
+from app.services.openrouter_client import openrouter_client
 
 logger = logging.getLogger("vaultcity.vision")
 
@@ -236,29 +236,32 @@ async def _try_gemini_vision(jpeg_bytes: bytes) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def _try_anthropic_text_summary(
+async def _try_qwen_text_summary(
     text: str, filename: str, user_id: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Ultra-low-cost, high-speed document classification, summary, and OCR quality evaluation.
-    Sends only text (~150-300 tokens) costing ~$0.00007.
-    Evaluates whether the extracted text is clear/legible or garbled/unclear.
+    Fast, low-cost document classification and summary using Qwen 2.5 (via OpenRouter).
+    Falls back gracefully to local deterministic heuristics if OPENROUTER_API_KEY is not set.
     """
-    api_key = (settings.ANTHROPIC_API_KEY or "").strip()
-    if not api_key:
-        return None
-
     clean_text = (text or "").strip()
     if len(clean_text) < 15:
         return None
 
-    model = settings.ANTHROPIC_MODEL or "claude-haiku-4-5-20251001"
-    prompt = f"""You are an intelligent document analyzer and OCR quality evaluator for a secure personal document vault.
-Analyze the following text extracted via local OCR from '{filename}'.
+    if not openrouter_client.is_configured:
+        # Local deterministic classifier fallback (works 100% offline)
+        inferred_type, inferred_cat = _infer_document_type_and_category(clean_text, filename)
+        first_few = clean_text[:200].replace("\n", " ")
+        return {
+            "summary": f"{inferred_type} from {filename}: {first_few[:120]}...",
+            "document_type": inferred_type,
+            "category_hint": inferred_cat,
+            "is_text_clear": True,
+            "_engine": "local-heuristic",
+        }
 
-Evaluate whether the extracted text is clear, legible, and meaningful:
-- Set "is_text_clear": true ONLY if the text contains clear, legible, coherent sentences or valid structured fields that accurately represent the document.
-- Set "is_text_clear": false if the text contains noisy artifacts, garbled/corrupted characters, fragmented symbols, or if critical document text (like names, IDs, numbers, addresses) appears scrambled, incomplete, or illegible.
+    model = settings.OPENROUTER_FAST_MODEL or "qwen/qwen-2.5-7b-instruct"
+    prompt = f"""You are an intelligent document analyzer and OCR evaluator for a secure personal document vault.
+Analyze the following text extracted from '{filename}'.
 
 Return ONLY valid JSON (no markdown formatting, no code fences, no extra text) with these exact keys:
 {{
@@ -273,7 +276,7 @@ Extracted Text:
 {clean_text[:4000]}"""
 
     try:
-        raw_text, token_info = await call_claude_messages(
+        raw_text, token_info = await openrouter_client.call_chat(
             messages=[{"role": "user", "content": prompt}],
             user_id=user_id,
             call_type="ocr_quality_eval",
@@ -284,95 +287,58 @@ Extracted Text:
         )
         parsed = _extract_json_block(raw_text)
         if parsed and parsed.get("summary"):
-            parsed["_engine"] = f"anthropic:{model}"
+            parsed["_engine"] = f"openrouter:{model}"
             parsed["_token_info"] = token_info
             return parsed
     except Exception as exc:
-        logger.warning("Anthropic Haiku text call failed (%s); falling back to vision escalation.", exc)
-    return None
+        logger.warning("Qwen text summary call failed (%s); falling back to local heuristic.", exc)
+
+    inferred_type, inferred_cat = _infer_document_type_and_category(clean_text, filename)
+    return {
+        "summary": f"{inferred_type} from {filename}",
+        "document_type": inferred_type,
+        "category_hint": inferred_cat,
+        "is_text_clear": True,
+        "_engine": "local-heuristic-fallback",
+    }
 
 
-async def _try_anthropic_vision_summary(
+async def _try_cloudflare_workers_vision(
     jpeg_bytes: bytes, filename: str, user_id: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    High-fidelity Claude Haiku Vision OCR and document classification.
-    Maintains high resolution (up to 1600px) so all text, IDs, codes, names, and tables are clearly legible.
-    Logs call details to dedicated claude_chat.log and records tokens in token_usage.db.
+    Image-Only Vision Analysis via Cloudflare Workers AI (Llama 3.2 11B Vision / Qwen-VL).
+    Uses daily free neurons with zero token charges.
+    Falls back gracefully if Cloudflare credentials are not configured.
     """
-    api_key = (settings.ANTHROPIC_API_KEY or "").strip()
-    if not api_key:
+    account_id = (settings.CLOUDFLARE_ACCOUNT_ID or "").strip()
+    api_token = (settings.CLOUDFLARE_API_TOKEN or "").strip()
+    if not account_id or not api_token:
         return None
 
-    # Maintain high resolution (up to 1600px) so fine document text and numbers are sharp
-    try:
-        with Image.open(io.BytesIO(jpeg_bytes)) as raw_img:
-            thumb = raw_img.copy()
-            if max(thumb.width, thumb.height) > 1600:
-                thumb.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-            thumb_buf = io.BytesIO()
-            thumb.convert("RGB").save(thumb_buf, format="JPEG", quality=90)
-            b64_data = base64.b64encode(thumb_buf.getvalue()).decode("ascii")
-    except Exception as exc:
-        logger.warning("Failed to prepare image for Haiku Vision: %s", exc)
-        b64_data = base64.b64encode(jpeg_bytes).decode("ascii")
-
-    model = settings.ANTHROPIC_MODEL or "claude-haiku-4-5-20251001"
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": b64_data,
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        f"Analyze this image from '{filename}' for a secure personal document vault.\n"
-                        "1. Extract ALL readable printed and handwritten text verbatim into 'visible_text' "
-                        "(names, numbers, IDs, dates, addresses, codes, labels, table rows, and headers). "
-                        "Do not omit any visible text.\n"
-                        "2. Provide a 1-2 sentence crisp 'summary' of what this document or image is about.\n"
-                        "3. Specify 'document_type' (e.g. 'Identity Document / Card', 'Passport', 'Tax Invoice / Bill', "
-                        "'Medical Prescription / Report', 'Certificate', 'Bank Statement', 'Photograph', 'Diagram').\n"
-                        "4. Specify 'category_hint' ('Identity', 'Financial', 'Medical', 'Personal', 'Other').\n\n"
-                        "Return ONLY a JSON object with keys: summary, visible_text, document_type, category_hint."
-                    ),
-                },
-            ],
-        }
-    ]
+    model = settings.CLOUDFLARE_VISION_MODEL or "@cf/meta/llama-3.2-11b-vision-instruct"
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "image": list(jpeg_bytes),
+        "prompt": VISION_JSON_PROMPT,
+    }
 
     try:
-        raw_text, token_info = await call_claude_messages(
-            messages=messages,
-            user_id=user_id,
-            call_type="vision_summary",
-            model=model,
-            max_tokens=600,
-            temperature=0.1,
-            timeout_sec=30.0,
-        )
-        parsed = _extract_json_block(raw_text)
-        if parsed and (parsed.get("summary") or parsed.get("visible_text")):
-            # If visible_text was returned as a list of strings, join with newlines
-            raw_vis = parsed.get("visible_text")
-            if isinstance(raw_vis, list):
-                parsed["visible_text"] = "\n".join(str(item) for item in raw_vis if item)
-            elif raw_vis is not None:
-                parsed["visible_text"] = str(raw_vis).strip()
-            else:
-                parsed["visible_text"] = ""
-            parsed["_engine"] = f"anthropic:{model}"
-            parsed["_token_info"] = token_info
-            return parsed
+        async with httpx.AsyncClient(timeout=35.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 200:
+                result = resp.json().get("result", {})
+                raw_desc = result.get("description") or result.get("response") or ""
+                parsed = _extract_json_block(raw_desc)
+                if parsed and (parsed.get("summary") or parsed.get("visible_text")):
+                    parsed["_engine"] = f"cloudflare:{model}"
+                    return parsed
     except Exception as exc:
-        logger.warning("Anthropic Haiku vision call failed (%s); falling back to local profiler.", exc)
+        logger.warning("Cloudflare Workers AI Vision call failed (%s); falling back.", exc)
     return None
 
 
@@ -430,45 +396,30 @@ async def analyze_image(
     word_count = len(re.findall(r"[A-Za-z0-9]{2,}", clean_ocr))
     orientation = "landscape" if w > h * 1.15 else ("portrait" if h > w * 1.15 else "square")
 
-    needs_direct_vision = False
-    haiku_eval = None
+    # Deterministic OCR Clarity Check (0 tokens, instant)
+    clean_chars = sum(1 for c in clean_ocr if c.isalnum() or c.isspace())
+    symbol_noise_ratio = 1.0 - (clean_chars / max(1, len(clean_ocr)))
+    is_clear_text = word_count >= 8 and symbol_noise_ratio < 0.22
 
-    if word_count >= 3:
-        # Ask AI model to evaluate whether the extracted OCR text is clear & legible (~$0.00007)
-        haiku_eval = await _try_anthropic_text_summary(clean_ocr, filename, user_id=user_id)
-        if haiku_eval:
-            is_clear = haiku_eval.get("is_text_clear")
-            # If AI explicitly says text is not clear, or summary indicates corruption/illegibility:
-            if is_clear is False:
-                logger.info(
-                    "AI evaluation determined OCR text for '%s' is not clear (%s). Escalating to Claude Haiku Vision.",
-                    filename,
-                    haiku_eval.get("clarity_reason"),
-                )
-                needs_direct_vision = True
-            elif is_clear is True:
-                needs_direct_vision = False
-            else:
-                summary_lower = (haiku_eval.get("summary") or "").lower()
-                if any(kw in summary_lower for kw in ["corrupt", "illegible", "unreadable", "scrambled", "fragmented characters", "unable to determine"]):
-                    needs_direct_vision = True
-        else:
-            if word_count < 8:
-                needs_direct_vision = True
+    needs_direct_vision = not is_clear_text
+    summary_eval = None
+
+    if is_clear_text:
+        # Fast Qwen text summary on clean OCR text (or local fallback if offline)
+        summary_eval = await _try_qwen_text_summary(clean_ocr, filename, user_id=user_id)
     else:
-        # Fewer than 3 words: photos, headshots, or text missed by Tesseract -> send image to AI vision
+        # Fewer than 8 words or high noise -> pure photo, stamp, or unreadable scan
         needs_direct_vision = True
 
-    # 2. If AI model said document extracted text is NOT clear (or image has no OCR text):
-    # Send image DIRECTLY to Claude Haiku Vision for high-resolution detailed extraction and description!
+    # 2. Image-Only Vision (Cloudflare Workers AI - Free daily neurons)
     if needs_direct_vision:
-        vision_res = await _try_anthropic_vision_summary(jpeg_bytes, filename, user_id=user_id)
+        vision_res = await _try_cloudflare_workers_vision(jpeg_bytes, filename, user_id=user_id)
         if vision_res:
             vis_text = (vision_res.get("visible_text") or "").strip()
             summary = (vision_res.get("summary") or f"{orig_format} Image").strip()
             doc_type = (vision_res.get("document_type") or f"{orig_format} Document").strip()
             cat_hint = vision_res.get("category_hint")
-            engine = f"anthropic-vision-escalated:{vision_res.get('_engine', 'haiku-vision')}"
+            engine = f"cloudflare-vision:{vision_res.get('_engine', 'workers-ai')}"
 
             # If vision extracted text, combine verbatim text + detailed summary
             if vis_text:
@@ -488,12 +439,12 @@ async def analyze_image(
                 image_format=orig_format,
             )
 
-    # 3. If AI model confirmed text IS clear:
-    if haiku_eval:
-        summary = haiku_eval.get("summary") or f"Document image containing {word_count} extracted words."
-        doc_type = haiku_eval.get("document_type") or f"{orig_format} Document"
-        cat_hint = haiku_eval.get("category_hint")
-        engine = f"tesseract-ocr+{haiku_eval.get('_engine', 'haiku-text')}"
+    # 3. If text is clear: use OCR text + Qwen summary
+    if summary_eval:
+        summary = summary_eval.get("summary") or f"Document image containing {word_count} extracted words."
+        doc_type = summary_eval.get("document_type") or f"{orig_format} Document"
+        cat_hint = summary_eval.get("category_hint")
+        engine = f"tesseract-ocr+{summary_eval.get('_engine', 'qwen-text')}"
         combined = f"[Extracted Text]\n{clean_ocr}\n\n[Document Summary]\n{summary}"
 
         return VisionResult(
@@ -538,8 +489,8 @@ async def summarize_text_document(
 ) -> Dict[str, Any]:
     """
     Generate an intelligent, human-like summary and precise document classification.
-    1. Tries ultra-low-cost Claude Haiku text input (~$0.00007).
-    2. Falls back to local intelligent document profiler if API key is not configured or offline.
+    1. Tries fast Qwen 2.5 text input (via OpenRouter).
+    2. Falls back to local intelligent document profiler if offline or API key is not configured.
     """
     clean = re.sub(r"\s+", " ", (text or "")).strip()
     if not clean:
@@ -550,18 +501,18 @@ async def summarize_text_document(
             "engine": "local-empty",
         }
 
-    # 1. Low-cost Claude Haiku Text Summary
-    haiku_res = await _try_anthropic_text_summary(clean, filename, user_id=user_id)
-    if haiku_res:
-        resolved_doc = str(haiku_res.get("document_type") or doc_type).strip()
-        summary_text = str(haiku_res.get("summary") or "").strip()
-        cat = haiku_res.get("category_hint")
+    # 1. Qwen Text Summary
+    qwen_res = await _try_qwen_text_summary(clean, filename, user_id=user_id)
+    if qwen_res:
+        resolved_doc = str(qwen_res.get("document_type") or doc_type).strip()
+        summary_text = str(qwen_res.get("summary") or "").strip()
+        cat = qwen_res.get("category_hint")
         cat_hint = cat if cat in {"Identity", "Financial", "Medical", "Personal", "Other"} else None
         return {
             "summary": summary_text,
             "doc_type": resolved_doc,
             "category_hint": cat_hint,
-            "engine": haiku_res.get("_engine", "anthropic-haiku"),
+            "engine": qwen_res.get("_engine", "qwen-text"),
         }
 
     # 2. Local Fallback: Intelligent Keyword Profiler

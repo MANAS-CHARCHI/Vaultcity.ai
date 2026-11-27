@@ -491,12 +491,12 @@ async def _extract_and_summarize(
     category_hint: Optional[str] = None
     visible_text = full_text
 
-    # 2b. If PDF is scanned or has very short text (< 250 chars) but has embedded images,
-    # extract the embedded image and send to OCR / VLM!
+    # 2b. Strict Ingestion Guard: ONLY scanned/photocopy PDFs with near-zero digital text (< 40 chars)
+    # are sent to embedded image extraction. Digital PDFs (resumes, statements, e-Aadhaar) 100% bypass vision!
     is_scanned_or_short_pdf = (
         (ext == ".pdf" or mime == "application/pdf")
         and pages
-        and (pages[0].get("source_type") == "scanned_pdf" or len(full_text.strip()) < 250)
+        and (pages[0].get("source_type") == "scanned_pdf" or len(full_text.strip()) < 40)
     )
     if is_scanned_or_short_pdf:
         try:
@@ -540,7 +540,7 @@ async def _extract_and_summarize(
     summary = summary_info["summary"]
     resolved_doc_type = summary_info.get("doc_type") or doc_type
     resolved_category = summary_info.get("category_hint") or category_hint
-    engine = f"{engine}+{summary_info.get('engine', 'haiku')}"
+    engine = f"{engine}+{summary_info.get('engine', 'qwen')}"
     return {
         "full_text": (full_text or "").replace("\x00", ""),
         "summary": (summary or "").replace("\x00", ""),
@@ -1132,6 +1132,19 @@ async def process_uploaded_file(
                 )
             except Exception as _e_sync:
                 logger.warning("Could not sync identity entities: %s", _e_sync)
+
+            # Ingestion-Time Profile Intelligence Agent: populates user_memory.md directly from document facts
+            try:
+                from app.services.memory_service import memory_service
+                await memory_service.extract_and_sync_profile_from_document(
+                    user_id=user_id,
+                    filename=fname,
+                    doc_type=doc_type,
+                    summary=clean_summary,
+                    text=(normalized_text or visible_text or ""),
+                )
+            except Exception as _e_mem:
+                logger.warning("Could not sync user_memory.md profile: %s", _e_mem)
 
             await _log_audit(
                 db,

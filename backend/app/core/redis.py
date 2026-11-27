@@ -552,6 +552,32 @@ async def set_json_cache(key: str, data: Any, ttl_seconds: int = 300) -> bool:
         return False
 
 
+async def get_text_cache(key: str) -> Optional[str]:
+    """Retrieve raw text (e.g. markdown memory) from Redis cache (<1ms response)."""
+    client = await get_redis_client()
+    if not client:
+        return None
+    try:
+        val = await client.get(key)
+        return str(val) if val is not None else None
+    except Exception as exc:
+        logger.warning("Redis get_text_cache failed for %s: %s", key, exc)
+    return None
+
+
+async def set_text_cache(key: str, data: str, ttl_seconds: int = 3600) -> bool:
+    """Store raw text string in Redis cache with TTL (defaults to 1 hour)."""
+    client = await get_redis_client()
+    if not client:
+        return False
+    try:
+        await client.set(key, str(data), ex=ttl_seconds)
+        return True
+    except Exception as exc:
+        logger.warning("Redis set_text_cache failed for %s: %s", key, exc)
+        return False
+
+
 async def delete_cache(key: str) -> bool:
     """Evict a specific key from Redis cache."""
     client = await get_redis_client()
